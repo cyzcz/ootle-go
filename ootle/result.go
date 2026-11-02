@@ -176,7 +176,7 @@ type FeeCost struct {
 	// Source is the FeeSource name (e.g. "Initial", "Storage"). The set of names is the
 	// core's, not this module's, and can change with a core version — 0.41.0 dropped
 	// "SignatureVerification" and "ExhaustBurn" and added "Reserved"; 0.42.0 dropped
-	// "Reserved" again. Treat an unknown
+	// "Reserved" again; 0.48.0 added "InputLoad" and "InputFanout". Treat an unknown
 	// name as a cost you do not recognise rather than assuming the set is closed.
 	Source string
 	// Amount is the cost charged from that source, in µTari.

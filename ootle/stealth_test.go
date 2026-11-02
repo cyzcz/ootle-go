@@ -111,24 +111,27 @@ func loadStealthFixture(t *testing.T, rel string) stealthFixture {
 // revealed-input withdraw) reference the account — so a mock transport must serve them or
 // resolution fails with "component/vault not found". All stealth_transfer fixtures share the same
 // from_account (component_aaaa…) and resource (resource_0101…); the component references vault_cccc…
-// which holds that resource.
+// which holds that resource. The values are base64 CBOR, as the indexer serves them: the
+// cosign/seal_with_auth fixture's account component and vault with their 32-byte vault and
+// resource ids swapped for vault_cccc… and resource_0101… (an account component with no access
+// rules, and a public fungible vault of 1 000 000).
 func seedStealthAccount(index map[string]transport.FetchedSubstate) {
 	const componentID = "component_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	const vaultID = "vault_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 	index[componentID] = transport.FetchedSubstate{
 		SubstateID:    componentID,
-		SubstateValue: json.RawMessage(`{"Component":{"body":{"state":[{"@cbor":"tag","tag":132,"value":{"@cbor":"bytes","hex":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}]},"header":{"access_rules":{"default":"DenyAll","method_access":{}},"entity_id":"00","owner_rule":"None","template_address":"0000000000000000000000000000000000000000000000000000000000000000"}}}`),
+		SubstateValue: json.RawMessage(`"ggCBgoVYIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAggCAgqCCAYBBAIIAgIGB2IRYIMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM"`),
 	}
 	index[vaultID] = transport.FetchedSubstate{
 		SubstateID:    vaultID,
-		SubstateValue: json.RawMessage(`{"Vault":{"freeze_flags":0,"resource_container":{"Fungible":{"address":"resource_0101010101010101010101010101010101010101010101010101010101010101","amount":"1000000","locked_amount":"0"}}}}`),
+		SubstateValue: json.RawMessage(`"ggKBgoIAg9iDWCABAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBARoAD0JAAAA="`),
 	}
 }
 
 // (a) ABI version guard — fails immediately if a stale lib is linked or ExpectedABIVersion does
 // not match the version exposing the current entry-point set (the seed-based, random-default ABI).
 func TestStealthABIVersionIsCurrent(t *testing.T) {
-	const want = "ootle-sdk-ffi-c/17"
+	const want = "ootle-sdk-ffi-c/19"
 	if got := cffi.ABIVersion(); got != want {
 		t.Fatalf("ABI version = %q, want %s (rebuild via make native)", got, want)
 	}
@@ -161,7 +164,7 @@ func TestBuildAndEncodeStealthTransfer_Smoke(t *testing.T) {
 // (b3) ValidateStealthTransfer over the C ABI: a freshly sealed transfer canonicalizes (decode +
 // verify-all-sigs succeed, the byte-unstable null set is zeroed, signer public keys survive). A
 // flipped trailing byte (the seal signature scalar) is REJECTED — a hard error, not a falsy ok —
-// mirroring the Rust tamper test. Decode + Schnorr verify run in the core; Go only marshals.
+// mirroring the Rust tamper test. Decode + sr25519 verify run in the core; Go only marshals.
 func TestValidateStealthTransfer_GoodAndTampered(t *testing.T) {
 	f := loadStealthFixture(t, "stealth_seal_with_input.json")
 	intent := f.toIntent(t)

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/tari-project/ootle-go/internal/cffi"
@@ -49,8 +50,8 @@ func loadCosignFixture(t *testing.T, rel string) cosignFixture {
 //	         A never sees B's).
 //	Party A: SealWithAuth (attach B's authorization + seal) → a submit-ready, validating transaction.
 //
-// All value-critical work (the signing message digest, the Schnorr signature, the
-// is_seal_signer_authorized rule, BOR encode + signature verification) stays in the core; this host
+// All value-critical work (the signing message digest, the sr25519 signature, the
+// main_signer rule, BOR encode + signature verification) stays in the core; this host
 // only marshals the record/authorization JSON between the two parties.
 //
 // The transfer is resolved against a mock transport seeded from the committed cosign vector's fetched
@@ -110,7 +111,7 @@ func TestManualCoSigning(t *testing.T) {
 	}
 
 	// --- Verify the cosigned seal validates (decode + verify EVERY signature, in the core). -------
-	// A bad/foreign authorization or a wrong is_seal_signer_authorized flag would fail here. We reuse
+	// A bad/foreign authorization or a wrong main_signer would fail here. We reuse
 	// the shared sealed-transfer canonicalizer (ootle_validate_stealth_transfer) — it BOR-decodes and
 	// verifies all signatures, returning an error if any fails.
 	netByte, _ := f.Input.Network.ByteValue()
@@ -180,4 +181,74 @@ func asOotleError(err error, target **Error) bool {
 		*target = e
 	}
 	return ok
+}
+
+// cosignMainSignerSetup resolves the cosign vector into a sealer with mainSigner set, and has B
+// authorize the resulting record.
+func cosignMainSignerSetup(t *testing.T, mainSigner func(bPublicKey string) string) (*CosignSealer, cosignFixture, Authorization) {
+	t.Helper()
+	f := loadCosignFixture(t, "seal_with_auth.json")
+	mock := &mockTransport{
+		fetch: func(_ context.Context, _ []string) ([]transport.FetchedSubstate, error) {
+			return f.Input.Fetched, nil
+		},
+	}
+	sealer, err := NewClient(mock, WithNetwork(f.Input.Network)).PrepareCosign(context.Background(), f.Input.Intent)
+	if err != nil {
+		t.Fatalf("PrepareCosign: %v", err)
+	}
+	t.Cleanup(sealer.Close)
+
+	// B's public key, from an authorization over a throwaway record (the key is the same).
+	probe, err := sealer.UnsignedRecord()
+	if err != nil {
+		t.Fatalf("UnsignedRecord: %v", err)
+	}
+	probeAuth, err := AddSignature(f.Input.Network, probe, f.Input.CosignSealPK, f.Input.CosignSignerSecret)
+	if err != nil {
+		t.Fatalf("AddSignature: %v", err)
+	}
+
+	sealer.SetMainSigner(mainSigner(probeAuth.PublicKey))
+	record, err := sealer.UnsignedRecord()
+	if err != nil {
+		t.Fatalf("UnsignedRecord: %v", err)
+	}
+	auth, err := AddSignature(f.Input.Network, record, f.Input.CosignSealPK, f.Input.CosignSignerSecret)
+	if err != nil {
+		t.Fatalf("AddSignature: %v", err)
+	}
+	return sealer, f, auth
+}
+
+// TestManualCoSigning_MainSigner seals with B named as the main signer: the record and the seal
+// both declare it, so B's authorization verifies.
+func TestManualCoSigning_MainSigner(t *testing.T) {
+	sealer, f, auth := cosignMainSignerSetup(t, func(b string) string { return b })
+
+	encoded, err := sealer.SealWithAuth(f.Input.Keys, []Authorization{auth})
+	if err != nil {
+		t.Fatalf("SealWithAuth: %v", err)
+	}
+	netByte, _ := f.Input.Network.ByteValue()
+	sealed, err := cffi.ValidateStealthTransfer(netByte, encoded.EncodedTransaction)
+	if err != nil {
+		t.Fatalf("the cosigned sealed transaction failed validation: %v", err)
+	}
+	if want := `"main_signer":{"Authorizer":"` + auth.PublicKey + `"}`; !strings.Contains(sealed, want) {
+		t.Errorf("sealed transaction does not declare %s", want)
+	}
+}
+
+// TestManualCoSigning_MainSignerMustAuthorize names A's seal key as the main signer while only B
+// authorizes: the core refuses the seal with INVALID.
+func TestManualCoSigning_MainSignerMustAuthorize(t *testing.T) {
+	sealer, f, auth := cosignMainSignerSetup(t, func(string) string { return "" })
+	sealer.SetMainSigner(f.Input.CosignSealPK)
+	// The record B signed declared no main signer, but the core checks membership first.
+	_, err := sealer.SealWithAuth(f.Input.Keys, []Authorization{auth})
+	var e *Error
+	if !asOotleError(err, &e) || e.Code != "INVALID" {
+		t.Fatalf("SealWithAuth with a main signer outside the authorizations: err = %v, want INVALID", err)
+	}
 }

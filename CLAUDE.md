@@ -46,8 +46,9 @@ a hard error, not a silent mis-marshal.
 Caveat: the tag covers the **C surface**, not the JSON contract carried over it. Core 0.39.0
 made `max_epoch` mandatory without touching the C surface, so the tag stayed at
 `ootle-sdk-ffi-c/16`. Nor is a bump guaranteed even for a C change: core 0.42.0 added
-parameters to two stealth fns still reporting `/16` (fixed by `/17` in 0.43.0). Re-vendor
-**every** platform together (`make native-all`) — a lib left behind at an older core is a
+parameters to two stealth fns still reporting `/16` (fixed by `/17` in 0.43.0), and core
+0.49.1 added six decoder fns still reporting `/19` (additive, so an older `/19` lib fails to
+link rather than mis-marshal). Re-vendor **every** platform together (`make native-all`) — a lib left behind at an older core is a
 silent mis-marshal the ABI check cannot catch.
 
 ## Architecture
@@ -89,7 +90,11 @@ exactly those ids — it never parses a component or derives a vault id itself. 
   (`ScanStealthOutput`). All stealth crypto stays in the core.
 - `ootle.go` — idiomatic types + build/encode entry points (`BuildAndEncode*`).
 - `result.go` — typed `FinalizedResult` / `RejectReason` / fee / diff / event types.
-- `events.go` — `Client.WatchEvents` (typed template events over SSE, reconnect + resume).
+- `events.go` — `Client.WatchEvents` (typed template events over SSE, reconnect + resume; a
+  410 for a pruned cursor ends the watch).
+- `encoded.go` — `Decode*` for the base64 CBOR values the indexer serves (core 0.48.0+ serves
+  substate values, execution results, receipts, events, resources and UTXOs this way). The SDK's
+  own flows pass these strings to the core verbatim; the host never decodes CBOR.
 
 ### Deterministic vs production paths
 Each transfer has a production variant (random: a fresh OS-RNG build seed) and a `*Deterministic`

@@ -2,15 +2,18 @@
 // GET /transactions/events/stream endpoint.
 //
 // Each raw SSE frame from transport.StreamTransactionEvents is decoded into a typed Event,
-// and a reconnect-with-Last-Event-ID loop with backoff is layered on top. Decoding is plain
-// JSON; the streamed Event's flat key→JSON-value payload is distinct from result.go's
-// EventSummary/EventPayload (the finalized-result [key,value] tuple shape).
+// and a reconnect-with-Last-Event-ID loop with backoff is layered on top. Since core 0.48.0 the
+// indexer streams each engine event as its CBOR encoding (base64 in the JSON data: body); the
+// core decodes it (DecodeEvent). The streamed Event's flat key→JSON-value payload is distinct
+// from result.go's EventSummary/EventPayload (the finalized-result [key,value] tuple shape).
 
 package ootle
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net/http"
 	"strconv"
 	"time"
 
@@ -52,28 +55,22 @@ type Event struct {
 	Topic string
 	// TransactionID is the hex transaction id that emitted the event.
 	TransactionID string
-	// SubstateID is the emitting substate id, or "" when the engine event had none
-	// (the wire substate_id was null).
+	// SubstateID is the emitting substate id, or "" when the engine event had none.
 	SubstateID string
 	// TemplateAddress is the address of the template that emitted the event.
 	TemplateAddress string
-	// Payload is the event payload as a flat key→raw-JSON map. Payload values are arbitrary
-	// CBOR since core 0.42.0, rendered to JSON by the indexer in the same forms as
-	// EventPayload.Value (strings, numbers, and "@cbor" sentinel objects such as a typed address
-	// or a u128 amount) — do not assume a string. It is nil when the wire payload was absent or
-	// null.
+	// Payload is the event payload as a flat key→raw-JSON map. Values are arbitrary CBOR
+	// rendered to JSON (strings, numbers, or tagged objects such as a typed address or a u128
+	// amount) — do not assume a string. It is nil when the event has no payload.
 	Payload map[string]json.RawMessage
 }
 
-// sseTxEvent mirrors the indexer's data: body for /transactions/events/stream. The topic
-// rides the SSE event: field only and is intentionally absent here.
+// sseTxEvent mirrors the indexer's data: body for /transactions/events/stream
+// (StreamedTransactionEvent). The topic rides the SSE event: field only and is intentionally
+// absent here; event is the engine Event as a base64 CBOR JSON string, decoded by the core.
 type sseTxEvent struct {
-	TransactionID string `json:"transaction_id"`
-	Event         struct {
-		SubstateID      *string                    `json:"substate_id"` // nullable
-		TemplateAddress string                     `json:"template_address"`
-		Payload         map[string]json.RawMessage `json:"payload"`
-	} `json:"event"`
+	TransactionID string          `json:"transaction_id"`
+	Event         json.RawMessage `json:"event"`
 }
 
 // eventStreamer is the optional streaming capability of a transport. The concrete
@@ -96,9 +93,9 @@ func filterToQuery(f EventFilter) transport.TransactionEventQuery {
 	}
 }
 
-// decode maps one raw SSE frame to a typed Event. The topic comes from raw.Event, the id
-// from raw.ID (parsed to int64; "" → 0, a live frame may lack an id: only in edge cases),
-// and the rest from the JSON data: body. A nil/null wire payload leaves Event.Payload nil.
+// decode maps one raw SSE frame to a typed Event. The topic comes from raw.Event, the id from
+// raw.ID (parsed to int64; "" → 0, a live frame may lack an id: only in edge cases), the
+// transaction id from the JSON data: body, and the rest from the event the core decodes.
 func decode(raw transport.RawSSEEvent) (Event, error) {
 	var body sseTxEvent
 	if err := json.Unmarshal(raw.Data, &body); err != nil {
@@ -114,19 +111,27 @@ func decode(raw transport.RawSSEEvent) (Event, error) {
 		id = parsed
 	}
 
-	substateID := ""
-	if body.Event.SubstateID != nil {
-		substateID = *body.Event.SubstateID
+	decoded, err := DecodeEvent(body.Event)
+	if err != nil {
+		return Event{}, err
 	}
 
 	return Event{
 		ID:              id,
 		Topic:           raw.Event,
 		TransactionID:   body.TransactionID,
-		SubstateID:      substateID,
-		TemplateAddress: body.Event.TemplateAddress,
-		Payload:         body.Event.Payload,
+		SubstateID:      decoded.SubstateID,
+		TemplateAddress: decoded.TemplateAddress,
+		Payload:         decoded.Payload,
 	}, nil
+}
+
+// isCursorPruned reports whether a stream error is the indexer's 410 Gone: the events after
+// the resume cursor have aged past its event retention window. Reconnecting from the same
+// cursor is refused the same way, so the watch must end.
+func isCursorPruned(err error) bool {
+	var httpErr *transport.HTTPError
+	return errors.As(err, &httpErr) && httpErr.Status == http.StatusGone
 }
 
 // WatchEvents streams transaction events matching filter as typed Events. It returns
@@ -143,6 +148,11 @@ func decode(raw transport.RawSSEEvent) (Event, error) {
 //
 // A single undecodable frame is skipped and the stream continues; errs carries only
 // connection-level problems. Cancelling ctx ends the watch cleanly with no error emitted.
+//
+// If the indexer has pruned the events after the resume cursor (see event_retention_epochs on
+// its /info), it refuses the stream with HTTP 410 on every reconnect, so the watch ends with that
+// *transport.HTTPError (Status 410) as its last error: resynchronise from current state, then
+// watch again without an AfterID.
 func (c *Client) WatchEvents(ctx context.Context, filter EventFilter) (<-chan Event, <-chan error) {
 	s, ok := c.transport.(eventStreamer)
 	if !ok {
@@ -203,6 +213,22 @@ func (c *Client) WatchEvents(ctx context.Context, filter EventFilter) (<-chan Ev
 			if ctx.Err() != nil {
 				// Clean cancel: no error emitted.
 				return
+			}
+
+			// A pruned cursor is refused on every reconnect: end the watch with the 410 as the
+			// last error, displacing an unread warning so the send never blocks.
+			if isCursorPruned(err) {
+				for {
+					select {
+					case errs <- err:
+						return
+					default:
+						select {
+						case <-errs:
+						default:
+						}
+					}
+				}
 			}
 
 			// Mid-stream failure with ctx still live: surface as a non-fatal warning

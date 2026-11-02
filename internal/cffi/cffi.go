@@ -38,7 +38,7 @@ import (
 // ExpectedABIVersion is the frozen ABI tag the vendored lib must report. A mismatch
 // means the vendored lib drifted from this wrapper — fail loudly rather than
 // mis-marshal. Keep in sync with `ootle_abi_version()` in ootle_sdk.h.
-const ExpectedABIVersion = "ootle-sdk-ffi-c/17"
+const ExpectedABIVersion = "ootle-sdk-ffi-c/19"
 
 var (
 	abiOnce sync.Once
@@ -397,10 +397,10 @@ func ParseAddress(addressStr string) (string, error) {
 
 // FormatIdentityAddress wraps ootle_format_identity_address. networkByte selects the
 // network-qualified HRP; accountKeyHex / viewOnlyKeyHex are lowercase-hex 32-byte public keys;
-// payRefHex is an OPTIONAL lowercase-hex payment reference ("" ⇒ no pay_ref, passed as a NULL
-// pointer). Returns the {bech32m} data JSON on success. Bad key/pay_ref hex or an oversize pay_ref
-// (> 64 bytes) is a "PARSE" error; an unknown network byte / null key is "INVALID".
-func FormatIdentityAddress(networkByte uint8, accountKeyHex, viewOnlyKeyHex, payRefHex string) (string, error) {
+// destinationTagHex is an OPTIONAL lowercase-hex destination tag ("" ⇒ none, passed as a NULL
+// pointer). Returns the {bech32m} data JSON on success. Bad key/destination-tag hex or an oversize
+// destination tag (> 64 bytes) is a "PARSE" error; an unknown network byte / null key is "INVALID".
+func FormatIdentityAddress(networkByte uint8, accountKeyHex, viewOnlyKeyHex, destinationTagHex string) (string, error) {
 	if err := ensureABI(); err != nil {
 		return "", err
 	}
@@ -408,20 +408,24 @@ func FormatIdentityAddress(networkByte uint8, accountKeyHex, viewOnlyKeyHex, pay
 	defer C.free(unsafe.Pointer(cAccount))
 	cView := C.CString(viewOnlyKeyHex)
 	defer C.free(unsafe.Pointer(cView))
+	cTag := nullableCString(destinationTagHex)
+	defer C.free(unsafe.Pointer(cTag))
 
-	// An empty payRefHex maps to a NULL C pointer (the absent pay_ref), matching the C ABI's
-	// nullable pay_ref_hex contract. A non-empty value is marshalled and freed normally.
-	var cPayRef *C.char
-	if payRefHex != "" {
-		cPayRef = C.CString(payRefHex)
-	}
-	defer C.free(unsafe.Pointer(cPayRef))
-
-	env := consume(C.ootle_format_identity_address(C.uint8_t(networkByte), cAccount, cView, cPayRef))
+	env := consume(C.ootle_format_identity_address(C.uint8_t(networkByte), cAccount, cView, cTag))
 	if !env.ok {
 		return "", env.asError()
 	}
 	return env.dataJSON, nil
+}
+
+// nullableCString marshals an optional string argument for a nullable C ABI parameter: "" maps to
+// a NULL pointer (the absent case), anything else to a C copy. C.free(NULL) is a no-op, so callers
+// defer the free unconditionally.
+func nullableCString(s string) *C.char {
+	if s == "" {
+		return nil
+	}
+	return C.CString(s)
 }
 
 // --- stealth send -----------------------------------------------------------------------
@@ -455,7 +459,7 @@ func FreeStealthHandle(h *StealthHandle) {
 // BuildAndEncodeStealthTransfer wraps ootle_build_and_encode_stealth_transfer — the one-shot
 // random-nonce (fresh OS-RNG seed) stealth send. fetchedJSON is a JSON array of FetchedSubstate
 // (every stealth-input UTXO up front), spendSecretsJSON a JSON array of hex scalars (positional
-// per intent.inputs); keysJSON is {account_secret}. The bytes/id are not reproducible. Returns
+// per intent.inputs); keysJSON is {account_secret, view_secret}. The bytes/id are not reproducible. Returns
 // the EncodedPublicTransfer data JSON on success. Stateless — no handle.
 func BuildAndEncodeStealthTransfer(networkByte uint8, intentJSON, fetchedJSON, spendSecretsJSON, keysJSON string) (string, error) {
 	if err := ensureABI(); err != nil {
@@ -478,7 +482,7 @@ func BuildAndEncodeStealthTransfer(networkByte uint8, intentJSON, fetchedJSON, s
 }
 
 // BuildAndEncodeStealthTransferWithSeed wraps the seed-reproducible counterpart. keysJSON is
-// {account_secret, seed}; the single build seed pins every derived nonce. The signatures the core
+// {account_secret, view_secret, seed}; the single build seed pins every derived nonce. The signatures the core
 // produces are reproducible; the embedded proofs are not byte-stable. Stateless — no handle.
 func BuildAndEncodeStealthTransferWithSeed(networkByte uint8, intentJSON, fetchedJSON, spendSecretsJSON, keysJSON string) (string, error) {
 	if err := ensureABI(); err != nil {
@@ -553,7 +557,7 @@ func BuildStealthUnsignedWithSeed(networkByte uint8, intentJSON, seedHex string)
 // to thread forward plus the resolution data JSON ({"status":"resolved"} or
 // {"status":"need_more","fetch_ids":[…]}). networkByte must be the transfer's network (the handle
 // does not carry it). fetchedJSON is a JSON array of FetchedSubstate; spendSecretsJSON a JSON array of
-// hex scalars (positional per intent.inputs); keysJSON is {account_secret} — the key that will seal,
+// hex scalars (positional per intent.inputs); keysJSON is {account_secret, view_secret} — the key that will seal,
 // which assembly names as the revealed output's receiver. The input StealthHandle is invalidated
 // regardless of outcome — callers must not reuse or free it.
 func ApplyFetchedSubstatesStealth(h *StealthHandle, networkByte uint8, fetchedJSON, spendSecretsJSON, keysJSON string) (*StealthHandle, string, error) {
@@ -585,7 +589,7 @@ func ApplyFetchedSubstatesStealth(h *StealthHandle, networkByte uint8, fetchedJS
 // SealAndEncodeStealthTransfer wraps ootle_seal_and_encode_stealth (random-nonce default; the seal
 // nonces are drawn from a fresh OS-RNG seed). It CONSUMES the stealth handle (the C side takes it by
 // value, even on error) and returns the EncodedPublicTransfer data JSON. networkByte must be the
-// transfer's network (the partial does not carry it). keysJSON is {account_secret}. The input
+// transfer's network (the partial does not carry it). keysJSON is {account_secret, view_secret}. The input
 // StealthHandle is invalidated regardless of outcome — callers must not reuse or free it.
 func SealAndEncodeStealthTransfer(h *StealthHandle, networkByte uint8, keysJSON string) (string, error) {
 	if err := ensureABI(); err != nil {
@@ -614,7 +618,7 @@ func SealAndEncodeStealthTransfer(h *StealthHandle, networkByte uint8, keysJSON 
 // strings → call → consume → check env.ok).
 
 // ScanStealthOutput wraps ootle_scan_stealth_output. scanKeysJSON is
-// {view_secret, account_secret?, skip_memo?}; outputJSON is an InboundStealthOutput. On success it
+// {view_secret, account_public_key, skip_memo?}; outputJSON is an InboundStealthOutput. On success it
 // returns the data JSON, which is ALWAYS a JSON object — the full DecryptedOutput ({"is_mine":true,
 // ...}) when addressed to the scanner, or {"is_mine":false} when not (a SUCCESS envelope, never an
 // error, and never null). Stateless — no handle is involved, so nothing to free beyond the result.
@@ -636,8 +640,8 @@ func ScanStealthOutput(networkByte uint8, scanKeysJSON, outputJSON string) (stri
 
 // DecodeStealthUTXO wraps ootle_decode_stealth_utxo — the single shared UTXO decode in the core.
 // substateIDJSON is the UTXO's canonical address string (utxo_<resource>_<commitment>) as a JSON
-// string; substateValueJSON is the SubstateValue JSON the indexer returned, verbatim. On success it
-// returns the decoded InboundStealthOutput JSON. The commitment + resource address come off the id;
+// string; substateValueJSON is the indexer's base64 CBOR substate value (a JSON string), verbatim.
+// On success it returns the decoded InboundStealthOutput JSON. The commitment + resource address come off the id;
 // the crypto fields come off the value body — all decode work stays in the core (no Go crypto/CBOR).
 // Stateless — no handle is involved.
 func DecodeStealthUTXO(substateIDJSON, substateValueJSON string) (string, error) {
@@ -657,9 +661,9 @@ func DecodeStealthUTXO(substateIDJSON, substateValueJSON string) (string, error)
 }
 
 // ScanStealthSubstate wraps ootle_scan_stealth_substate — the fused decode → scan in the core.
-// scanKeysJSON is {view_secret, account_secret?, skip_memo?}; substateIDJSON is the UTXO's canonical
-// address string as a JSON string; substateValueJSON is the SubstateValue JSON the indexer returned,
-// verbatim. On success it returns the data JSON, which is ALWAYS a JSON object — the full
+// scanKeysJSON is {view_secret, account_public_key, skip_memo?}; substateIDJSON is the UTXO's
+// canonical address string as a JSON string; substateValueJSON is the indexer's base64 CBOR substate
+// value (a JSON string), verbatim. On success it returns the data JSON, which is ALWAYS a JSON object — the full
 // DecryptedOutput ({"is_mine":true,...}) when addressed to the scanner, or {"is_mine":false} when not
 // (a SUCCESS envelope, never an error, and never null). Stateless — no handle is involved.
 func ScanStealthSubstate(networkByte uint8, scanKeysJSON, substateIDJSON, substateValueJSON string) (string, error) {
@@ -685,7 +689,7 @@ func ScanStealthSubstate(networkByte uint8, scanKeysJSON, substateIDJSON, substa
 // encoded_transaction (the TransactionEnvelope wire form) produced by a stealth seal op. The core
 // BOR-decodes it, VERIFIES every signature, and returns the decoded transaction as canonical JSON
 // with the byte-unstable set ["agg_range_proof","balance_proof","signature"] nulled (signer public
-// keys survive). Decode + Schnorr verification stay in the core.
+// keys survive). Decode + sr25519 verification stay in the core.
 //
 // A bad signature is an ERROR (typed *Error with code "VALIDATION"), never a falsy success;
 // malformed/odd hex is "PARSE"; undecodable bytes "ENCODING"; a null arg / unknown network
@@ -737,9 +741,9 @@ func BuildStealthOutputsStatementWithSeed(networkByte uint8, intentJSON, seedHex
 }
 
 // DecodeSubstate wraps ootle_decode_substate — the typed substate decode in the core.
-// substateValueJSON is the indexer's SubstateValue JSON, passed through verbatim. On success it
-// returns the kind-tagged DecodedSubstate JSON ({"kind":...,"value":{...}}). u64 balances stay native
-// (no float). All decode work stays in the core (no Go CBOR). Stateless — no handle is involved.
+// substateValueJSON is the indexer's base64 CBOR substate value (a JSON string), passed through
+// verbatim. On success it returns the kind-tagged DecodedSubstate JSON ({"kind":...,"value":{...}}).
+// u64 balances stay native (no float). All decode work stays in the core (no Go CBOR). Stateless — no handle is involved.
 // A malformed/unknown substate yields "PARSE"; a non-u64 balance "VALIDATION"; a null arg "INVALID".
 func DecodeSubstate(substateValueJSON string) (string, error) {
 	if err := ensureABI(); err != nil {
@@ -756,8 +760,8 @@ func DecodeSubstate(substateValueJSON string) (string, error) {
 }
 
 // AccountBalances wraps ootle_account_balances — the per-resource REVEALED balance sum in the core.
-// accountSubstateJSON is the account Component substate JSON; vaultSubstatesJSON is a JSON array of
-// FetchedSubstate records ({substate_id, version, substate_value}) — the vaults the host already
+// accountSubstateJSON is the account Component substate value (base64 CBOR JSON string);
+// vaultSubstatesJSON is a JSON array of FetchedSubstate records ({substate_id, version, substate_value}) — the vaults the host already
 // fetched. On success it returns {"balances":[{"resource_address":...,"revealed_balance":<u64>}]};
 // revealed balances stay native u64. The sum stays in the core (no Go arithmetic on values).
 //
@@ -781,7 +785,7 @@ func AccountBalances(accountSubstateJSON, vaultSubstatesJSON string) (string, er
 
 // AccountBalanceWants wraps ootle_account_balance_wants — names the vault substate ids a host should
 // fetch to satisfy AccountBalances for an account. accountSubstateJSON is the account Component
-// substate JSON. On success it returns {"fetch_ids":["vault_<hex>",...]} — the same component-vault
+// substate value (base64 CBOR JSON string). On success it returns {"fetch_ids":["vault_<hex>",...]} — the same component-vault
 // discovery AccountBalances does, surfaced as opaque ids (the fetch_ids pattern). The discovery stays
 // in the core. A non-component account is "VALIDATION"; malformed JSON "PARSE"; a null arg "INVALID".
 func AccountBalanceWants(accountSubstateJSON string) (string, error) {
@@ -804,22 +808,26 @@ func AccountBalanceWants(accountSubstateJSON string) (string, error) {
 // extracts the serializable UnsignedTransactionRecord to ship (UnsignedRecordForCosign — a BORROW, the
 // handle is NOT consumed), party B signs it committing to A's seal pubkey (AddSignature), and A seals
 // the resolved handle with B's authorizations attached (SealAndEncodeWithAuth[Production], which
-// CONSUME the handle). All value-critical work (the signing message digest, the Schnorr signature, the
-// is_seal_signer_authorized rule, BOR encode) stays in the core; the host only marshals JSON.
+// CONSUME the handle). All value-critical work (the signing message digest, the sr25519 signature, the
+// main_signer rule, BOR encode) stays in the core; the host only marshals JSON.
 
 // UnsignedRecordForCosign wraps ootle_unsigned_record_for_cosign. It BORROWS the public handle (does
 // NOT consume it) and returns the UnsignedTransactionRecord JSON ({"unsigned":...}) party A ships to B.
 // The handle is left intact — consume it later via SealAndEncodeWithAuth* or free it via FreeHandle.
-// An unresolved partial is a "RESOLUTION" error.
-func UnsignedRecordForCosign(h *Handle) (string, error) {
+// mainSignerHex (lowercase hex, "" ⇒ NULL ⇒ no main signer) names the co-signer the transaction acts
+// as wherever it needs a single signer; pass the same value to SealAndEncodeWithAuth. An unresolved
+// partial is a "RESOLUTION" error; bad mainSignerHex is "PARSE".
+func UnsignedRecordForCosign(h *Handle, mainSignerHex string) (string, error) {
 	if err := ensureABI(); err != nil {
 		return "", err
 	}
 	if h == nil || h.ptr == nil {
 		return "", &Error{Code: "INTERNAL", Message: "UnsignedRecordForCosign called with a nil/consumed handle"}
 	}
+	cMainSigner := nullableCString(mainSignerHex)
+	defer C.free(unsafe.Pointer(cMainSigner))
 	// Borrowing call — do NOT nil h.ptr (the handle survives for a later consume/free).
-	env := consume(C.ootle_unsigned_record_for_cosign(h.ptr))
+	env := consume(C.ootle_unsigned_record_for_cosign(h.ptr, cMainSigner))
 	if !env.ok {
 		return "", env.asError()
 	}
@@ -852,9 +860,11 @@ func AddSignature(networkByte uint8, unsignedJSON, sealPublicKeyHex, signerSecre
 // SealAndEncodeWithAuth wraps ootle_seal_and_encode_with_auth (party A, random-nonce default). It
 // CONSUMES the handle and returns the EncodedPublicTransfer data JSON. keysJSON is {account_secret};
 // authorizationsJSON is a JSON array [{"public_key":"<hex>","signature":"<hex>"},...] (empty ⇒
-// behaves like the plain single-key seal). The bytes/id are not reproducible. The input Handle is
-// invalidated regardless of outcome.
-func SealAndEncodeWithAuth(h *Handle, keysJSON, authorizationsJSON string) (string, error) {
+// behaves like the plain single-key seal). mainSignerHex must be the value passed to
+// UnsignedRecordForCosign ("" ⇒ NULL ⇒ none): a main signer that is not one of the authorizations is
+// "INVALID", and an authorization signed over a record with a different main signer is "VALIDATION".
+// The bytes/id are not reproducible. The input Handle is invalidated regardless of outcome.
+func SealAndEncodeWithAuth(h *Handle, keysJSON, authorizationsJSON, mainSignerHex string) (string, error) {
 	if err := ensureABI(); err != nil {
 		return "", err
 	}
@@ -865,12 +875,68 @@ func SealAndEncodeWithAuth(h *Handle, keysJSON, authorizationsJSON string) (stri
 	defer C.free(unsafe.Pointer(cKeys))
 	cAuths := C.CString(authorizationsJSON)
 	defer C.free(unsafe.Pointer(cAuths))
+	cMainSigner := nullableCString(mainSignerHex)
+	defer C.free(unsafe.Pointer(cMainSigner))
 
 	ptr := h.ptr
 	h.ptr = nil // the C call consumes it; invalidate our copy first to prevent double-free.
-	env := consume(C.ootle_seal_and_encode_with_auth(ptr, cKeys, cAuths))
+	env := consume(C.ootle_seal_and_encode_with_auth(ptr, cKeys, cAuths, cMainSigner))
 	if !env.ok {
 		return "", env.asError()
 	}
 	return env.dataJSON, nil
+}
+
+// --- indexer value decoders ---------------------------------------------------------------------
+//
+// The indexer serves engine values (events, substate values, execution results, receipts,
+// resources, UTXOs) as their CBOR encoding, base64 in a JSON string. These wrap the core's
+// stateless decoders, which return each value's serde JSON. The input is the served JSON string
+// verbatim, quotes included; bare base64 or a value of another type is "PARSE". No handle.
+
+// decodeServed runs one of the stateless ootle_decode_* fns over a served JSON value.
+func decodeServed(servedJSON string, decode func(*C.char) C.OotleResult) (string, error) {
+	if err := ensureABI(); err != nil {
+		return "", err
+	}
+	cServed := C.CString(servedJSON)
+	defer C.free(unsafe.Pointer(cServed))
+
+	env := consume(decode(cServed))
+	if !env.ok {
+		return "", env.asError()
+	}
+	return env.dataJSON, nil
+}
+
+// DecodeEvent wraps ootle_decode_event. On success it returns
+// {"substate_id":"<id>"|null,"template_address":"<hex>","topic":"<topic>","payload":{…}}.
+func DecodeEvent(eventJSON string) (string, error) {
+	return decodeServed(eventJSON, func(p *C.char) C.OotleResult { return C.ootle_decode_event(p) })
+}
+
+// DecodeSubstateValue wraps ootle_decode_substate_value. On success it returns the value's serde
+// JSON keyed by variant ({"Component":{…}}, {"Vault":{…}}, …).
+func DecodeSubstateValue(substateValueJSON string) (string, error) {
+	return decodeServed(substateValueJSON, func(p *C.char) C.OotleResult { return C.ootle_decode_substate_value(p) })
+}
+
+// DecodeExecuteResult wraps ootle_decode_execute_result, returning the ExecuteResult's serde JSON.
+func DecodeExecuteResult(executeResultJSON string) (string, error) {
+	return decodeServed(executeResultJSON, func(p *C.char) C.OotleResult { return C.ootle_decode_execute_result(p) })
+}
+
+// DecodeTransactionReceipt wraps ootle_decode_transaction_receipt, returning the receipt's serde JSON.
+func DecodeTransactionReceipt(receiptJSON string) (string, error) {
+	return decodeServed(receiptJSON, func(p *C.char) C.OotleResult { return C.ootle_decode_transaction_receipt(p) })
+}
+
+// DecodeResource wraps ootle_decode_resource, returning the Resource's serde JSON.
+func DecodeResource(resourceJSON string) (string, error) {
+	return decodeServed(resourceJSON, func(p *C.char) C.OotleResult { return C.ootle_decode_resource(p) })
+}
+
+// DecodeUTXO wraps ootle_decode_utxo, returning the Utxo's serde JSON.
+func DecodeUTXO(utxoJSON string) (string, error) {
+	return decodeServed(utxoJSON, func(p *C.char) C.OotleResult { return C.ootle_decode_utxo(p) })
 }

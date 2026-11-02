@@ -39,7 +39,7 @@ func TestFetchSubstatesRoundTrip(t *testing.T) {
 		// Echo a substate back for each requested id.
 		subs := map[string]indexerSubstate{}
 		for i, id := range gotReq.Requests {
-			subs[id] = indexerSubstate{Version: uint64(i), Substate: json.RawMessage(`{"Vault":{"id":"` + id + `"}}`)}
+			subs[id] = indexerSubstate{Version: uint64(i), Value: json.RawMessage(`"` + id + `-cbor"`)}
 		}
 		writeJSON(t, w, fetchResponse{Substates: subs})
 	}))
@@ -80,7 +80,7 @@ func TestFetchSubstatesChunksAt20(t *testing.T) {
 		mu.Unlock()
 		subs := map[string]indexerSubstate{}
 		for _, id := range req.Requests {
-			subs[id] = indexerSubstate{Version: 1, Substate: json.RawMessage(`{}`)}
+			subs[id] = indexerSubstate{Version: 1, Value: json.RawMessage(`"AA=="`)}
 		}
 		writeJSON(t, w, fetchResponse{Substates: subs})
 	}))
@@ -123,7 +123,7 @@ func TestFetchSubstatesOmitsMissing(t *testing.T) {
 		// Return only the first id; the rest are "missing".
 		subs := map[string]indexerSubstate{}
 		if len(req.Requests) > 0 {
-			subs[req.Requests[0]] = indexerSubstate{Version: 0, Substate: json.RawMessage(`{}`)}
+			subs[req.Requests[0]] = indexerSubstate{Version: 0, Value: json.RawMessage(`"AA=="`)}
 		}
 		writeJSON(t, w, fetchResponse{Substates: subs})
 	}))
@@ -164,7 +164,8 @@ func TestFetchSubstateSingleOK(t *testing.T) {
 		if r.URL.Path != "/substates/component_xyz" {
 			t.Errorf("path = %q, want /substates/component_xyz", r.URL.Path)
 		}
-		writeJSON(t, w, indexerSubstate{Version: 7, Substate: json.RawMessage(`{"Component":{}}`)})
+		// GetSubstateResponse as the 0.49 indexer serves it: the value is base64 CBOR under state.up.
+		_, _ = w.Write([]byte(`{"version":7,"state":{"up":{"substate":"oWFhAQ=="}},"verified":true}`))
 	}))
 	defer srv.Close()
 
@@ -176,8 +177,23 @@ func TestFetchSubstateSingleOK(t *testing.T) {
 	if got == nil || got.SubstateID != "component_xyz" || got.Version != 7 {
 		t.Fatalf("got %+v, want id=component_xyz version=7", got)
 	}
-	if string(got.SubstateValue) != `{"Component":{}}` {
+	if string(got.SubstateValue) != `"oWFhAQ=="` {
 		t.Errorf("SubstateValue = %q, want it carried verbatim", got.SubstateValue)
+	}
+}
+
+func TestFetchSubstateSingleDownIsNil(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"version":3,"state":{"down":{}},"verified":true}`))
+	}))
+	defer srv.Close()
+
+	got, err := NewClient(srv.URL).FetchSubstate(context.Background(), "component_spent")
+	if err != nil {
+		t.Fatalf("FetchSubstate on a down answer returned error: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("FetchSubstate on a down answer = %+v, want nil", got)
 	}
 }
 

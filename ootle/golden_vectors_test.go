@@ -50,7 +50,7 @@ const (
 	// component_<hex> via the engine derivation.
 	opDeriveAccountAddress = "derive_account_address"
 	// Address parse/format codec. RNG-free, byte-stable: format_identity_address encodes an {network,
-	// account_key, view_only_key, pay_ref?} record into an otl_… bech32m string; parse_address parses
+	// account_key, view_only_key, destination_tag?} record into an otl_… bech32m string; parse_address parses
 	// a substate id OR an otl_… identity into the kind-tagged ParsedAddress.
 	opFormatIdentityAddress = "format_identity_address"
 	opParseAddress          = "parse_address"
@@ -76,11 +76,11 @@ const (
 	// Co-signing: the authorize→attach→seal hand-off.
 	//
 	// cosign_seal_with_auth is the full authorize→attach→seal, semantic compare (the sealed tx carries
-	// a Schnorr seal scalar that is byte-unstable). Go drives the whole flow over the C ABI —
+	// a sr25519 seal scalar that is byte-unstable). Go drives the whole flow over the C ABI —
 	// build+resolve a handle, extract the unsigned record, authorize (production), seal-with-auth —
 	// then hands the seal back to ootle_validate_stealth_transfer (the shared decode+verify-all-sigs
 	// canonicalizer) and compares the deterministic decoded fields (signer pubkeys +
-	// is_seal_signer_authorized survive).
+	// main_signer survive).
 	opCosignSealWithAuth = "cosign_seal_with_auth"
 )
 
@@ -126,12 +126,12 @@ type goldenFixture struct {
 		Seed string `json:"seed"`
 		// Address-derive AND format-identity ops — the lowercase-hex 32-byte account public key.
 		AccountPublicKey string `json:"account_public_key"`
-		// Format-identity op only — the lowercase-hex 32-byte view-only public key + optional pay_ref.
-		ViewOnlyKey string `json:"view_only_key"`
-		PayRef      string `json:"pay_ref"`
+		// Format-identity op only — the lowercase-hex 32-byte view-only public key + optional destination_tag.
+		ViewOnlyKey    string `json:"view_only_key"`
+		DestinationTag string `json:"destination_tag"`
 		// Parse-address op only — the address string (component_/resource_<hex> or otl_…).
 		Address string `json:"address"`
-		// Decode-stealth-utxo op only — the UTXO substate id + the indexer's SubstateValue JSON.
+		// Decode-stealth-utxo op only — the UTXO substate id + the indexer's base64 CBOR substate value.
 		// SubstateValue is also reused by decode_substate (any substate) and account_balances (the
 		// account component).
 		SubstateID    string          `json:"substate_id"`
@@ -295,7 +295,7 @@ func runGoldenVector(t *testing.T, fx goldenFixture) {
 		// over the C ABI and assert the canonical component_<hex> string matches expected.
 		runDeriveAccountAddress(t, fx)
 	case opFormatIdentityAddress:
-		// Identity-address formatting, byte-stable: encode the fixture's {network, keys, pay_ref?} over
+		// Identity-address formatting, byte-stable: encode the fixture's {network, keys, destination_tag?} over
 		// the C ABI and assert the otl_… bech32m string matches expected.
 		runFormatIdentityAddress(t, fx)
 	case opParseAddress:
@@ -445,15 +445,15 @@ func runFormatIdentityAddress(t *testing.T, fx goldenFixture) {
 	copy(account32[:], account)
 	copy(view32[:], view)
 
-	var payRef []byte
-	if fx.Input.PayRef != "" {
-		payRef, err = hex.DecodeString(fx.Input.PayRef)
+	var destinationTag []byte
+	if fx.Input.DestinationTag != "" {
+		destinationTag, err = hex.DecodeString(fx.Input.DestinationTag)
 		if err != nil {
-			t.Fatalf("fixture %q: input.pay_ref must be lowercase hex: %v", fx.Name, err)
+			t.Fatalf("fixture %q: input.destination_tag must be lowercase hex: %v", fx.Name, err)
 		}
 	}
 
-	got, derr := FormatIdentityAddress(*fx.Input.Network, account32, view32, payRef)
+	got, derr := FormatIdentityAddress(*fx.Input.Network, account32, view32, destinationTag)
 	if derr != nil {
 		t.Fatalf("fixture %q: FormatIdentityAddress: %v", fx.Name, derr)
 	}
@@ -888,11 +888,11 @@ func runParse(t *testing.T, fx goldenFixture) {
 // block: the network + scan keys (view_secret + optional account_secret + skip_memo) + the
 // inbound output to scan. Decoded only inside runScan so the generic loader stays op-agnostic.
 type scanGoldenInput struct {
-	Network       Network              `json:"network"`
-	ViewSecret    string               `json:"view_secret"`
-	AccountSecret *string              `json:"account_secret"`
-	SkipMemo      bool                 `json:"skip_memo"`
-	Output        InboundStealthOutput `json:"output"`
+	Network          Network              `json:"network"`
+	ViewSecret       string               `json:"view_secret"`
+	AccountPublicKey string               `json:"account_public_key"`
+	SkipMemo         bool                 `json:"skip_memo"`
+	Output           InboundStealthOutput `json:"output"`
 }
 
 // runScan executes one scan_stealth_output vector through ScanStealthOutput (over the C ABI)
@@ -914,9 +914,9 @@ func runScan(t *testing.T, fx goldenFixture) {
 	}
 
 	scanKeys := StealthScanKeys{
-		ViewSecret:    in.ViewSecret,
-		AccountSecret: in.AccountSecret,
-		SkipMemo:      in.SkipMemo,
+		ViewSecret:       in.ViewSecret,
+		AccountPublicKey: in.AccountPublicKey,
+		SkipMemo:         in.SkipMemo,
 	}
 	got, err := ScanStealthOutput(in.Network, scanKeys, in.Output)
 	if err != nil {
@@ -956,7 +956,7 @@ func runScan(t *testing.T, fx goldenFixture) {
 // C ABI, then (2) hands the seal back to ootle_validate_stealth_transfer, which BOR-decodes it,
 // verifies every signature, and returns the canonical JSON with the byte-unstable fields
 // (agg_range_proof / balance_proof / signature scalars) nulled, and (3) compares that JSON
-// to expected.sealed_transaction_semantic. The value-critical crypto — BOR decode + Schnorr
+// to expected.sealed_transaction_semantic. The value-critical crypto — BOR decode + sr25519
 // verification + the shared null set — lives in the core; the Go host only marshals and compares
 // JSON. A marshalling drift, a malformed intent, bad-length entropy, an input-decryption failure,
 // a balance-proof failure, or a deterministic-field mismatch all fail here.
@@ -1015,7 +1015,7 @@ func runStealthEncodeBuild(t *testing.T, fx goldenFixture) {
 
 	// Hand the seal just produced back across the C ABI to ootle_validate_stealth_transfer, which
 	// BOR-decodes it, verifies every signature, and returns the canonical JSON with the byte-unstable
-	// set nulled. Decode + Schnorr verify stay in the core; Go only compares the JSON.
+	// set nulled. Decode + sr25519 verify stay in the core; Go only compares the JSON.
 	canonicalJSON, verr := cffi.ValidateStealthTransfer(netByte, encoded.EncodedTransaction)
 	if verr != nil {
 		t.Fatalf("fixture %q: ValidateStealthTransfer (decode+verify) over C ABI failed: %v", fx.Name, verr)
@@ -1185,7 +1185,7 @@ func cosignAuthorize(t *testing.T, fx goldenFixture, handle *cffi.Handle, netByt
 	if fx.Input.CosignSealPK == "" || fx.Input.CosignSignerSecret == "" {
 		t.Fatalf("fixture %q: cosign op requires input.cosign_seal_pk + input.cosign_signer_secret", fx.Name)
 	}
-	recordJSON, err := cffi.UnsignedRecordForCosign(handle)
+	recordJSON, err := cffi.UnsignedRecordForCosign(handle, "")
 	if err != nil {
 		t.Fatalf("fixture %q: UnsignedRecordForCosign: %v", fx.Name, err)
 	}
@@ -1206,8 +1206,8 @@ func cosignAuthorize(t *testing.T, fx goldenFixture, handle *cffi.Handle, netByt
 // build+resolve A's handle → extract the unsigned record → B authorizes (production) → A seals with
 // the authorization attached → hand the seal back to ootle_validate_stealth_transfer (the shared
 // decode+verify-all-sigs canonicalizer) and compare the deterministic decoded fields against the
-// vendored vector. The signer public keys + is_seal_signer_authorized survive the null set; the
-// Schnorr scalars are nulled. Decode + Schnorr verify stay in the core.
+// vendored vector. The signer public keys + main_signer survive the null set; the
+// sr25519 scalars are nulled. Decode + sr25519 verify stay in the core.
 func runCosignSealWithAuth(t *testing.T, fx goldenFixture) {
 	t.Helper()
 	if fx.compareMode() != "semantic" {
@@ -1233,7 +1233,7 @@ func runCosignSealWithAuth(t *testing.T, fx goldenFixture) {
 	if err != nil {
 		t.Fatalf("marshal authorizations: %v", err)
 	}
-	encodedJSON, err := cffi.SealAndEncodeWithAuth(handle, string(keysJSON), string(authsJSON))
+	encodedJSON, err := cffi.SealAndEncodeWithAuth(handle, string(keysJSON), string(authsJSON), "")
 	handle = nil // consumed.
 	if err != nil {
 		t.Fatalf("fixture %q: SealAndEncodeWithAuth: %v", fx.Name, err)
@@ -1249,7 +1249,7 @@ func runCosignSealWithAuth(t *testing.T, fx goldenFixture) {
 // compare. A random-nonce seal (ootle-sdk-ffi-c/16) is no longer byte-reproducible, so instead of
 // comparing the encoded bytes the runner hands them back to the core over the C ABI, which BOR-decodes
 // the sealed transaction, verifies EVERY signature, and returns canonical JSON with the byte-unstable
-// Schnorr scalars nulled; the runner then byte-compares the deterministic fields (instructions, inputs,
+// sr25519 scalars nulled; the runner then byte-compares the deterministic fields (instructions, inputs,
 // fee, signer public keys) against the fixture's expected.sealed_transaction_semantic. This preserves
 // the cross-language ENCODING conformance guarantee while tolerating the random signature bytes, and
 // mirrors the Rust golden-vector compare. The decode+verify is transaction-agnostic (it works for the

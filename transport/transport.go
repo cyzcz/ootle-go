@@ -55,12 +55,13 @@ const DefaultTimeout = 30 * time.Second
 // FetchedSubstate is the boundary record the core's apply_fetched_substates consumes.
 // It mirrors crates/ootle_sdk_core/src/inputs.rs::FetchedSubstate exactly:
 //
-//	{ "substate_id": <id>, "version": <u64>, "substate_value": <SubstateValue JSON> }
+//	{ "substate_id": <id>, "version": <u64>, "substate_value": "<base64 CBOR>" }
 //
-// SubstateValue is carried verbatim as json.RawMessage — the transport never decodes
-// it; the core parses it into the internal SubstateValue (a malformed value ⇒ the
-// core's PARSE error). The indexer returns each substate as { "version", "substate" };
-// FetchSubstates does the trivial field rename (substate → substate_value, map key →
+// SubstateValue is carried verbatim as json.RawMessage — the JSON string holding the
+// value's CBOR encoding in base64, exactly as the indexer serves it. The transport never
+// decodes it; the core decodes it into the internal SubstateValue (a malformed value ⇒ the
+// core's PARSE error). The indexer returns each batch entry as { "version", "value" };
+// FetchSubstates does the trivial field rename (value → substate_value, map key →
 // substate_id) and nothing more.
 type FetchedSubstate struct {
 	SubstateID    string          `json:"substate_id"`
@@ -200,12 +201,25 @@ type fetchRequest struct {
 	CachedOnly bool     `json:"cached_only"`
 }
 
-// indexerSubstate is one entry of GetSubstatesResponse.substates (and the body of
-// GET /substates/{id}): { "version", "substate" }. `substate` is the SubstateValue JSON,
+// indexerSubstate is one entry of GetSubstatesResponse.substates (the engine's
+// EncodedSubstate): { "version", "value" }. `value` is the base64 CBOR SubstateValue,
 // carried verbatim.
 type indexerSubstate struct {
-	Version  uint64          `json:"version"`
-	Substate json.RawMessage `json:"substate"`
+	Version uint64          `json:"version"`
+	Value   json.RawMessage `json:"value"`
+}
+
+// getSubstateResponse is the body of GET /substates/{id} (GetSubstateResponse):
+// { "version", "state": {"up": {"substate"}} | {"down": {}}, "verified", "proof"? }. Only
+// the version and the up value are read; the proof fields are of no interest to the SDK.
+type getSubstateResponse struct {
+	Version uint64 `json:"version"`
+	State   struct {
+		Up *struct {
+			Substate json.RawMessage `json:"substate"`
+		} `json:"up"`
+		Down *struct{} `json:"down"`
+	} `json:"state"`
 }
 
 // fetchResponse is the body of GetSubstatesResponse.
@@ -256,7 +270,7 @@ func (c *Client) FetchSubstates(ctx context.Context, ids []string) ([]FetchedSub
 			out = append(out, FetchedSubstate{
 				SubstateID:    id,
 				Version:       sub.Version,
-				SubstateValue: sub.Substate,
+				SubstateValue: sub.Value,
 			})
 		}
 	}
@@ -264,8 +278,10 @@ func (c *Client) FetchSubstates(ctx context.Context, ids []string) ([]FetchedSub
 }
 
 // FetchSubstate fetches a single substate via GET /substates/{id}. A 404 ⇒ (nil, nil)
-// (definitively not found, not an error), matching the Python transport. The returned
-// FetchedSubstate carries the SubstateValue verbatim for the core to parse.
+// (definitively not found, not an error), matching the Python transport. A "down" answer
+// (the version is spent; the indexer sends one only for an include_proof request, which
+// this client never makes) also maps to (nil, nil). The returned FetchedSubstate carries the
+// base64 CBOR value verbatim for the core to decode.
 func (c *Client) FetchSubstate(ctx context.Context, id string) (*FetchedSubstate, error) {
 	path := "/substates/" + url.PathEscape(id)
 	raw, err := c.do(ctx, http.MethodGet, path, nil, true)
@@ -275,14 +291,20 @@ func (c *Client) FetchSubstate(ctx context.Context, id string) (*FetchedSubstate
 	if raw == nil {
 		return nil, nil // 404 → not found
 	}
-	var sub indexerSubstate
-	if err := json.Unmarshal(raw, &sub); err != nil {
+	var resp getSubstateResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
 		return nil, fmt.Errorf("transport: decode /substates/%s response: %w", id, err)
+	}
+	if resp.State.Up == nil {
+		if resp.State.Down != nil {
+			return nil, nil // spent
+		}
+		return nil, fmt.Errorf("transport: decode /substates/%s response: state is neither up nor down", id)
 	}
 	return &FetchedSubstate{
 		SubstateID:    id,
-		Version:       sub.Version,
-		SubstateValue: sub.Substate,
+		Version:       resp.Version,
+		SubstateValue: resp.State.Up.Substate,
 	}, nil
 }
 

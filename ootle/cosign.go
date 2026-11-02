@@ -9,7 +9,7 @@ import (
 )
 
 // Authorization is one co-signer's authorization over an unsigned transaction: the signer's public
-// key and the Schnorr signature, both lowercase hex (no 0x). It carries no secret material. Party B
+// key and the sr25519 signature, both lowercase hex (no 0x). It carries no secret material. Party B
 // produces it with AddSignature; party A attaches it via CosignSealer.SealWithAuth. Mirrors the core's
 // Authorization shape.
 type Authorization struct {
@@ -19,7 +19,7 @@ type Authorization struct {
 
 // AddSignature is PARTY B's step in the co-sign hand-off: authorize party A's unsigned-transaction
 // record, committing to A's seal public key (so the signature binds to the exact tx A will seal). The
-// production (random-nonce) Schnorr signature stays in the core; the host only marshals JSON.
+// production (random-nonce) sr25519 signature stays in the core; the host only marshals JSON.
 //
 // unsignedRecordJSON is the UnsignedTransactionRecord JSON A shipped (from
 // CosignSealer.UnsignedRecord). sealPublicKeyHex is A's seal public key (lowercase hex). signerSecretHex
@@ -53,9 +53,10 @@ func AddSignature(network Network, unsignedRecordJSON, sealPublicKeyHex, signerS
 //
 // CosignSealer is NOT safe for concurrent use.
 type CosignSealer struct {
-	handle  *cffi.Handle
-	network Network
-	netByte uint8
+	handle     *cffi.Handle
+	network    Network
+	netByte    uint8
+	mainSigner string
 }
 
 // PrepareCosign is PARTY A's step 1: build + resolve a public transfer to a fully-resolved partial,
@@ -107,15 +108,31 @@ func (c *Client) PrepareCosign(ctx context.Context, intent PublicTransferIntent)
 	return &CosignSealer{handle: handle, network: network, netByte: netByte}, nil
 }
 
+// SetMainSigner names the co-signer the transaction acts as wherever it needs a single signer
+// (OwnerRule::OwnedBySigner, the default owner of new components and resources, and
+// transaction_signer_public_key in templates). publicKeyHex is that co-signer's account public key
+// (lowercase hex); "" (the default) declares no main signer. The main signer must be one of the
+// authorizations passed to SealWithAuth, else the seal fails with an "INVALID" error.
+//
+// Call it before UnsignedRecord: the record commits to the main signer, so every co-signer signs over
+// it, and SealWithAuth seals with the same value. Changing it after the record has been shipped makes
+// the collected authorizations fail to verify ("VALIDATION").
+func (s *CosignSealer) SetMainSigner(publicKeyHex string) {
+	if s != nil {
+		s.mainSigner = publicKeyHex
+	}
+}
+
 // UnsignedRecord returns the serializable unsigned-transaction record A ships to co-signers (party B's
 // AddSignature input). It BORROWS the handle (does not consume it), so A can ship the record and still
 // seal afterwards. An unresolved partial is a "RESOLUTION" error (PrepareCosign always returns a
-// resolved one, so this is a safety guard).
+// resolved one, so this is a safety guard). The record declares the main signer set with
+// SetMainSigner (none by default).
 func (s *CosignSealer) UnsignedRecord() (string, error) {
 	if s == nil || s.handle == nil {
 		return "", &Error{Code: "INTERNAL", Message: "UnsignedRecord called on a closed/consumed CosignSealer"}
 	}
-	recordJSON, cerr := cffi.UnsignedRecordForCosign(s.handle)
+	recordJSON, cerr := cffi.UnsignedRecordForCosign(s.handle, s.mainSigner)
 	if cerr != nil {
 		return "", fromCffiError(cerr)
 	}
@@ -125,7 +142,9 @@ func (s *CosignSealer) UnsignedRecord() (string, error) {
 // SealWithAuth is PARTY A's final step and the supported offline/HSM co-sign seal: attach the collected
 // authorizations and seal (random-nonce) into the submit-ready encoded transaction. keys is just the
 // account secret. It CONSUMES the sealer (the handle is released); do not reuse it. An empty
-// authorizations slice seals as a plain single-key transfer.
+// authorizations slice seals as a plain single-key transfer, with the seal signer as the main signer
+// (SetMainSigner must then be unset). With authorizations it declares the SetMainSigner key, or no
+// main signer when unset.
 func (s *CosignSealer) SealWithAuth(keys PublicTransferKeys, authorizations []Authorization) (EncodedPublicTransfer, error) {
 	var out EncodedPublicTransfer
 	if s == nil || s.handle == nil {
@@ -144,7 +163,7 @@ func (s *CosignSealer) SealWithAuth(keys PublicTransferKeys, authorizations []Au
 	}
 	h := s.handle
 	s.handle = nil // the seal consumes it.
-	encodedJSON, cerr := cffi.SealAndEncodeWithAuth(h, string(keysJSON), string(authsJSON))
+	encodedJSON, cerr := cffi.SealAndEncodeWithAuth(h, string(keysJSON), string(authsJSON), s.mainSigner)
 	if cerr != nil {
 		return out, fromCffiError(cerr)
 	}

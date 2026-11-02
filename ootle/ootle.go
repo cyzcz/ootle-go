@@ -352,7 +352,7 @@ const (
 
 // ParsedAddress is the kind-tagged result of ParseAddress, mirroring the core's ParsedAddress enum.
 // For the substate kinds (component/resource) only Kind + Canonical are set; for the identity kind
-// the decoded fields (Network, AccountKey, ViewOnlyKey, optional PayRef) and the canonical Bech32m
+// the decoded fields (Network, AccountKey, ViewOnlyKey, optional DestinationTag) and the canonical Bech32m
 // string are set. The two keys are never swapped (the core reads them by name).
 type ParsedAddress struct {
 	Kind AddressKind `json:"kind"`
@@ -364,8 +364,9 @@ type ParsedAddress struct {
 	AccountKey string `json:"account_key,omitempty"`
 	// ViewOnlyKey is the view-only public key, lowercase hex (identity kind only).
 	ViewOnlyKey string `json:"view_only_key,omitempty"`
-	// PayRef is the optional payment reference, lowercase hex (identity kind only; nil if absent).
-	PayRef *string `json:"pay_ref,omitempty"`
+	// DestinationTag is the optional destination tag (a recipient-chosen reference such as an
+	// exchange deposit id), lowercase hex (identity kind only; nil if absent).
+	DestinationTag *string `json:"destination_tag,omitempty"`
 	// Bech32m is the canonical otl_… string (identity kind only).
 	Bech32m string `json:"bech32m,omitempty"`
 }
@@ -395,22 +396,19 @@ type identityAddressResult struct {
 
 // FormatIdentityAddress formats an otl_… identity / payment address (bech32m) from its parts. The
 // network selects the network-qualified HRP (otl_ MainNet, otl_loc_ LocalNet, otl_esm_ Esmeralda,
-// …); accountKey and viewKey are the 32-byte public keys; payRef is an OPTIONAL payment reference
-// (pass nil for none; over 64 bytes is a "PARSE" error). The bech32m encoding stays entirely in the
+// …); accountKey and viewKey are the 32-byte public keys; destinationTag is an OPTIONAL destination
+// tag (pass nil or empty for none; over 64 bytes is a "PARSE" error). The bech32m encoding stays entirely in the
 // core (the host re-implements nothing) — Go only marshals the bytes in and the string out.
 //
 // The two keys are passed labelled (account vs view), and the core constructs the address by field
 // name, so they can never be silently swapped.
-func FormatIdentityAddress(network Network, accountKey, viewKey [32]byte, payRef []byte) (string, error) {
+func FormatIdentityAddress(network Network, accountKey, viewKey [32]byte, destinationTag []byte) (string, error) {
 	netByte, ok := network.ByteValue()
 	if !ok {
 		return "", &Error{Code: "VALIDATION", Message: fmt.Sprintf("unknown network %q", network)}
 	}
-	payRefHex := ""
-	if payRef != nil {
-		payRefHex = hex.EncodeToString(payRef)
-	}
-	dataJSON, cerr := cffi.FormatIdentityAddress(netByte, hex.EncodeToString(accountKey[:]), hex.EncodeToString(viewKey[:]), payRefHex)
+	// hex.EncodeToString(nil) is "", which the cffi layer passes as NULL (no destination tag).
+	dataJSON, cerr := cffi.FormatIdentityAddress(netByte, hex.EncodeToString(accountKey[:]), hex.EncodeToString(viewKey[:]), hex.EncodeToString(destinationTag))
 	if cerr != nil {
 		return "", fromCffiError(cerr)
 	}
