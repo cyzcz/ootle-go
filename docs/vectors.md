@@ -43,7 +43,7 @@ byte-unstable. A byte compare is therefore impossible.
 (1) **decodes** the sealed BOR bytes back into a `Transaction` and **verifies every
 signature** on it, and (2) compares the **decoded** transaction structurally against
 `expected.sealed_transaction_semantic` with the byte-unstable fields nulled out
-(`agg_range_proof`, `balance_proof`, and every Schnorr `signature` scalar — the signer
+(`agg_range_proof`, `balance_proof`, and every sr25519 `signature` scalar — the signer
 *public keys* survive, so the key-selection contract is still locked). The outputs-statement
 vectors are compared the same way (validate cryptographically, then compare the statement with
 `agg_range_proof` nulled + the deterministic `aggregated_output_mask`).
@@ -53,14 +53,14 @@ runner): the Go host (1) drives `ootle_build_and_encode_stealth_transfer_with_se
 fixture input (intent + keys-with-seed + fetched UTXOs + spend secrets) to produce the seal,
 then (2) hands that seal **back** across the C ABI to `ootle_validate_stealth_transfer`, which
 BOR-decodes it, **verifies every signature**, and returns the decoded transaction as canonical
-JSON with the byte-unstable set (`agg_range_proof`, `balance_proof`, every Schnorr `signature`
+JSON with the byte-unstable set (`agg_range_proof`, `balance_proof`, every sr25519 `signature`
 scalar) nulled — the signer *public keys* survive. The Go arm then (3) compares that canonical
 JSON structurally against `expected.sealed_transaction_semantic`. This is the **full**
 deterministic-field lock: a marshalling drift, a malformed intent, a bad seed, an
 input-mask decryption failure, a balance-proof failure, **a bad signature, or a
 deterministic-field mismatch** all fail the Go arm — exactly as they fail the Rust runner.
 
-The value-critical crypto — BOR decode, Schnorr verification, and the shared null set (the
+The value-critical crypto — BOR decode, sr25519 verification, and the shared null set (the
 core's `decode_and_canonicalize_sealed_transfer`) — lives entirely in the core C fn. The
 thin Go host re-ports none of it; it only marshals JSON and compares the canonical structure.
 

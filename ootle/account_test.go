@@ -85,19 +85,16 @@ func TestAccountKeyBundles(t *testing.T) {
 	if got := a.TransferKeys(); got.AccountSecret != a.Keys.AccountSecret {
 		t.Errorf("TransferKeys.AccountSecret = %q, want %q", got.AccountSecret, a.Keys.AccountSecret)
 	}
-	if got := a.StealthKeys(); got.AccountSecret != a.Keys.AccountSecret {
-		t.Errorf("StealthKeys.AccountSecret = %q, want %q", got.AccountSecret, a.Keys.AccountSecret)
+	if got := a.StealthKeys(); got.AccountSecret != a.Keys.AccountSecret || got.ViewSecret != a.View.ViewSecret {
+		t.Errorf("StealthKeys = %+v, want the account and view secrets", got)
 	}
 
 	scan := a.ScanKeys()
 	if scan.ViewSecret != a.View.ViewSecret {
 		t.Errorf("ScanKeys.ViewSecret = %q, want %q", scan.ViewSecret, a.View.ViewSecret)
 	}
-	if scan.AccountSecret == nil {
-		t.Fatalf("ScanKeys.AccountSecret is nil, want non-nil for an Account")
-	}
-	if *scan.AccountSecret != a.Keys.AccountSecret {
-		t.Errorf("ScanKeys.AccountSecret = %q, want %q", *scan.AccountSecret, a.Keys.AccountSecret)
+	if scan.AccountPublicKey != a.Keys.AccountPublicKey {
+		t.Errorf("ScanKeys.AccountPublicKey = %q, want %q", scan.AccountPublicKey, a.Keys.AccountPublicKey)
 	}
 }
 

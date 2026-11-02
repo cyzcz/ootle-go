@@ -18,11 +18,11 @@ type scanFixture struct {
 	Operation string `json:"operation"`
 	Input     struct {
 		ScanInput struct {
-			Network       Network              `json:"network"`
-			ViewSecret    string               `json:"view_secret"`
-			AccountSecret *string              `json:"account_secret"`
-			SkipMemo      bool                 `json:"skip_memo"`
-			Output        InboundStealthOutput `json:"output"`
+			Network          Network              `json:"network"`
+			ViewSecret       string               `json:"view_secret"`
+			AccountPublicKey string               `json:"account_public_key"`
+			SkipMemo         bool                 `json:"skip_memo"`
+			Output           InboundStealthOutput `json:"output"`
 		} `json:"stealth_scan_input"`
 	} `json:"input"`
 	Expected struct {
@@ -33,9 +33,9 @@ type scanFixture struct {
 // scanKeys builds the StealthScanKeys from the fixture's scan input.
 func (f scanFixture) scanKeys() StealthScanKeys {
 	return StealthScanKeys{
-		ViewSecret:    f.Input.ScanInput.ViewSecret,
-		AccountSecret: f.Input.ScanInput.AccountSecret,
-		SkipMemo:      f.Input.ScanInput.SkipMemo,
+		ViewSecret:       f.Input.ScanInput.ViewSecret,
+		AccountPublicKey: f.Input.ScanInput.AccountPublicKey,
+		SkipMemo:         f.Input.ScanInput.SkipMemo,
 	}
 }
 

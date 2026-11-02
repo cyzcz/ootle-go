@@ -62,8 +62,8 @@ type accountBalanceWantsEnvelope struct {
 	FetchIDs []string `json:"fetch_ids"`
 }
 
-// DecodeSubstate decodes any fetched substate (the indexer's SubstateValue JSON) into the kind-tagged
-// DecodedSubstate. It is a pure, stateless call — the decode lives in the core (no Go CBOR). A vault's
+// DecodeSubstate decodes any fetched substate (the indexer's base64 CBOR substate value, a JSON
+// string) into the kind-tagged DecodedSubstate. It is a pure, stateless call — the decode lives in the core (no Go CBOR). A vault's
 // RevealedBalance is the revealed amount only. An error carries the stable core code ("PARSE" for a
 // malformed/unknown substate, "VALIDATION" for a non-u64 balance).
 func DecodeSubstate(substateValue json.RawMessage) (DecodedSubstate, error) {
@@ -79,8 +79,8 @@ func DecodeSubstate(substateValue json.RawMessage) (DecodedSubstate, error) {
 }
 
 // AccountBalances computes the revealed balance per resource for an account, summed across its vaults
-// in the core (no value-critical arithmetic in Go). account is the account Component substate JSON;
-// vaults are the vault substates the host already fetched (the ids AccountBalanceWants named). The core
+// in the core (no value-critical arithmetic in Go). account is the account Component substate value
+// as the indexer serves it (base64 CBOR); vaults are the vault substates the host already fetched (the ids AccountBalanceWants named). The core
 // rediscovers the account's vault ids from its state and matches them by id: a referenced vault not
 // supplied is a "RESOLUTION" error, never a silent zero. Balances are native uint64 and are the
 // revealed/unlocked amounts only — a confidential total needs separate UTXO scans.
@@ -101,8 +101,8 @@ func AccountBalances(account json.RawMessage, vaults []transport.FetchedSubstate
 }
 
 // AccountBalanceWants names the vault substate ids a host should fetch to satisfy AccountBalances for
-// an account. account is the account Component substate JSON; the returned ids are the same
-// component-vault discovery AccountBalances does, surfaced as opaque ids. The discovery stays in the
+// an account. account is the account Component substate value as the indexer serves it (base64
+// CBOR); the returned ids are the same component-vault discovery AccountBalances does, surfaced as opaque ids. The discovery stays in the
 // core. A non-component account is "VALIDATION"; a malformed substate "PARSE".
 func AccountBalanceWants(account json.RawMessage) ([]string, error) {
 	dataJSON, cerr := cffi.AccountBalanceWants(string(account))

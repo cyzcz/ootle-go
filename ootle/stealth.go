@@ -263,22 +263,24 @@ func (i StealthTransferIntent) utxoSubstateIDs() ([]string, error) {
 
 // --- Seeded construction / offline-build API --------------------------------------------
 //
-// As of ABI ootle-sdk-ffi-c/16 every Schnorr signature is signed with a fresh random nonce (no
+// As of ABI ootle-sdk-ffi-c/16 every signature is signed with a fresh random nonce (no
 // seed feeds a signing nonce), so the SEAL is never byte-reproducible. The seed below pins only the
 // non-signature reproducible randomness the core still derives from it — the per-output masks and
 // AEAD/ElGamal/ZK construction nonces — which the offline build+encode path (BuildAndEncodeStealthTransfer)
 // uses. Production callers want StealthProductionKeys plus the Client.SendStealthTransfer driver.
 
-// StealthTransferKeys mirrors the C ABI's keys_json ({account_secret, seed}, all lowercase hex).
-// The seed pins the per-output construction randomness (masks / ZK nonces) for the offline
-// BuildAndEncodeStealthTransfer path; it does NOT pin any signing nonce (signatures are random).
+// StealthTransferKeys mirrors the C ABI's keys_json ({account_secret, view_secret, seed}, all
+// lowercase hex). The view secret is required: it keys each spent stealth input's one-time spend key
+// H(v·R)·G + A. The seed pins the per-output construction randomness (masks / ZK nonces) for the
+// offline BuildAndEncodeStealthTransfer path; it does NOT pin any signing nonce (signatures are random).
 type StealthTransferKeys struct {
 	AccountSecret string `json:"account_secret"`
+	ViewSecret    string `json:"view_secret"`
 	Seed          string `json:"seed,omitempty"`
 }
 
 // StealthProductionKeys is the production key bundle. On the production path the seed is drawn
-// freshly from OsRng inside the core, so only AccountSecret need be set; the bundle keeps one shape,
+// freshly from OsRng inside the core, so only AccountSecret and ViewSecret need be set; the bundle keeps one shape,
 // so this is an alias of StealthTransferKeys rather than a duplicate struct (Seed uses omitempty so
 // a production caller omits it). The encoded bytes/id are not reproducible on the production path.
 type StealthProductionKeys = StealthTransferKeys
@@ -497,23 +499,20 @@ func BuildAndEncodeStealthTransfer(network Network, intent StealthTransferIntent
 // stateless operation does not belong on a transport-holding client). Scanning is byte-stable.
 
 // StealthScanKeys is the receive-side key bundle. It mirrors the C ABI's scan_keys_json shape
-// exactly ({view_secret, account_secret?, skip_memo?}); all secrets are lowercase hex.
+// exactly ({view_secret, account_public_key, skip_memo?}); all keys are lowercase hex.
 //
 // ViewSecret (required) is the view secret scalar paired with the sender's public nonce to
-// re-derive the AEAD key and decrypt the output. AccountSecret (optional) enables the ownership
-// checks — when supplied the scanner verifies the output's spend-condition + UTXO tag are addressed
-// to that account; when nil those checks are skipped (a successful decrypt alone is treated as
-// is_mine). SkipMemo, when true, skips memo decoding (the value/mask are still recovered).
-//
-// AccountSecret uses omitempty so a nil omits the key entirely, which the core's #[serde(default)]
-// Option accepts (the common view-only-scan case). SkipMemo likewise uses omitempty so the common
-// (false) case omits the key, also satisfying the core's #[serde(default)].
+// re-derive the AEAD key and decrypt the output. AccountPublicKey (required) is the recipient's
+// account public key: with the view secret it re-derives the one-time spend key H(v·R)·G + A and the
+// UTXO tag, confirming the output is spendable by that account. No account secret is needed, so a
+// view-only wallet confirms ownership as fully as a spending one. SkipMemo, when true, skips memo
+// decoding (the value/mask are still recovered); omitempty omits the common false case, which the
+// core's #[serde(default)] accepts.
 type StealthScanKeys struct {
 	// ViewSecret is the view secret scalar (32 bytes, lowercase hex). Required.
 	ViewSecret string `json:"view_secret"`
-	// AccountSecret is the optional account secret (32 bytes, lowercase hex) enabling ownership
-	// (spend-condition + tag) verification. Nil/absent ⇒ those checks are skipped.
-	AccountSecret *string `json:"account_secret,omitempty"`
+	// AccountPublicKey is the recipient's account public key (32 bytes, lowercase hex). Required.
+	AccountPublicKey string `json:"account_public_key"`
 	// SkipMemo, when true, skips memo decryption/decoding. Defaults to false.
 	SkipMemo bool `json:"skip_memo,omitempty"`
 }
@@ -539,11 +538,11 @@ type InboundStealthOutput struct {
 	// AccessRuleAllowAll). Reuses the send-side StealthPayTo selector.
 	PayTo StealthPayTo `json:"pay_to"`
 	// SpendPublicKey is the on-chain one-time spend public key for a StealthPublicKey output
-	// (lowercase hex). Nil for AccessRuleAllowAll. Verified against the account when AccountSecret
-	// is supplied.
+	// (lowercase hex). Nil for AccessRuleAllowAll. Verified against the key the scanner re-derives
+	// from the view secret and the account public key.
 	SpendPublicKey *string `json:"spend_public_key"`
 	// UtxoTag is the optional 4-byte UTXO scanning tag (lowercase hex, 8 chars). Verified against
-	// the receiver-derived tag when AccountSecret is supplied.
+	// the tag the scanner derives from its view secret.
 	UtxoTag *string `json:"utxo_tag"`
 	// ResourceAddress is the resource being transferred (resource_<hex>), needed to re-derive the
 	// scanning tag.
@@ -629,8 +628,8 @@ func ScanStealthOutputs(network Network, scanKeys StealthScanKeys, outputs []Inb
 // single shared UTXO decode lives in the Rust core (the spend path reuses the same extraction).
 //
 // substateID is the UTXO's canonical address string (utxo_<resource>_<commitment>) — it carries the
-// on-chain commitment + resource address the value body omits. substateValue is the SubstateValue
-// JSON the indexer returned (transport.FetchedSubstate.SubstateValue), passed through verbatim; the
+// on-chain commitment + resource address the value body omits. substateValue is the base64 CBOR
+// value the indexer returned (transport.FetchedSubstate.SubstateValue), passed through verbatim; the
 // host does NO crypto/CBOR on it. An error carries the stable core code (PARSE for a malformed id /
 // value, INVALID for a non-UTXO / frozen / burnt substate, KEY for a malformed nonce).
 func DecodeStealthUTXO(substateID string, substateValue json.RawMessage) (InboundStealthOutput, error) {

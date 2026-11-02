@@ -534,7 +534,7 @@ func TestCoreAcceptsTypedMetadataAndReadOnlyInput(t *testing.T) {
 		t.Fatalf("resolution = %s (err %v), want resolved", resJSON, uerr)
 	}
 
-	recordJSON, err := cffi.UnsignedRecordForCosign(handle)
+	recordJSON, err := cffi.UnsignedRecordForCosign(handle, "")
 	if err != nil {
 		t.Fatalf("UnsignedRecordForCosign: %v", err)
 	}

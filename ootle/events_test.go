@@ -3,6 +3,7 @@ package ootle
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -64,13 +65,24 @@ func recvEvent(t *testing.T, out <-chan Event, errs <-chan error) Event {
 	return Event{}
 }
 
-const fullBody = `{"transaction_id":"abc123","event":{"substate_id":"component_deadbeef","template_address":"tmpl_001","payload":{"amount":100,"to":"acct_x"}}}`
+// servedDepositEvent is an engine Event as the indexer serves it: its CBOR encoding in base64
+// (substate component_4141…, template 00…00, topic std.deposit, payload {amount: "1000000"}),
+// taken from the parse_finalized_result/accept fixture.
+const servedDepositEvent = `"hIIAgdiAWCBBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQVggAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABrc3RkLmRlcG9zaXTYgaFmYW1vdW50ZzEwMDAwMDA="`
+
+// eventBody is a StreamedTransactionEvent data: body for txID carrying servedDepositEvent.
+func eventBody(txID string) string {
+	return `{"transaction_id":"` + txID + `","event":` + servedDepositEvent + `}`
+}
+
+var fullBody = eventBody("abc123")
 
 // --- tests -----------------------------------------------------------------------------
 
-// TestWatchEventsTypedMapping covers happy-path typed decode: topic from event:, id parsed
-// to int64, body fields, and the flat key→raw-JSON payload.
-func TestWatchEventsTypedMapping(t *testing.T) {
+// TestWatchEventsMapping covers the happy-path decode: topic from event:, id parsed to int64,
+// the transaction id, and the substate id, template address and payload the core decodes from
+// the served event.
+func TestWatchEventsMapping(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeSSEFrame(t, w, "std.vault.withdraw", "4271", fullBody)
 		<-r.Context().Done() // flushed already; safe to block
@@ -91,28 +103,24 @@ func TestWatchEventsTypedMapping(t *testing.T) {
 	if ev.TransactionID != "abc123" {
 		t.Errorf("TransactionID = %q, want abc123", ev.TransactionID)
 	}
-	if ev.SubstateID != "component_deadbeef" {
-		t.Errorf("SubstateID = %q, want component_deadbeef", ev.SubstateID)
+	if want := "component_" + strings.Repeat("41", 32); ev.SubstateID != want {
+		t.Errorf("SubstateID = %q, want %q", ev.SubstateID, want)
 	}
-	if ev.TemplateAddress != "tmpl_001" {
-		t.Errorf("TemplateAddress = %q, want tmpl_001", ev.TemplateAddress)
+	if want := strings.Repeat("00", 32); ev.TemplateAddress != want {
+		t.Errorf("TemplateAddress = %q, want %q", ev.TemplateAddress, want)
 	}
-	want := map[string]string{"amount": `100`, "to": `"acct_x"`}
-	if len(ev.Payload) != len(want) {
-		t.Fatalf("Payload = %v, want %v", ev.Payload, want)
-	}
-	for k, v := range want {
-		if string(ev.Payload[k]) != v {
-			t.Errorf("Payload[%q] = %s, want %s", k, ev.Payload[k], v)
-		}
+	if len(ev.Payload) != 1 || string(ev.Payload["amount"]) != `"1000000"` {
+		t.Errorf("Payload = %v, want {amount: \"1000000\"}", ev.Payload)
 	}
 }
 
-// TestWatchEventsSubstateIDNull covers substate_id: null mapping to "".
-func TestWatchEventsSubstateIDNull(t *testing.T) {
-	const body = `{"transaction_id":"tx1","event":{"substate_id":null,"template_address":"tmpl_2","payload":{"k":"v"}}}`
+// TestWatchEventsUndecodableEventSkipped asserts frames whose event is missing or not a served
+// event are skipped, as any other undecodable frame is.
+func TestWatchEventsUndecodableEventSkipped(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		writeSSEFrame(t, w, "topic.x", "7", body)
+		writeSSEFrame(t, w, "topic", "1", `{"transaction_id":"t0","event":null}`)
+		writeSSEFrame(t, w, "topic", "2", `{"transaction_id":"t0","event":"AQ=="}`)
+		writeSSEFrame(t, w, "topic", "3", eventBody("t1"))
 		<-r.Context().Done()
 	}))
 	defer srv.Close()
@@ -121,12 +129,52 @@ func TestWatchEventsSubstateIDNull(t *testing.T) {
 	defer cancel()
 	out, errs := ootleClient(srv.URL).WatchEvents(ctx, EventFilter{})
 
-	ev := recvEvent(t, out, errs)
-	if ev.SubstateID != "" {
-		t.Errorf("SubstateID = %q, want empty string for null", ev.SubstateID)
+	if ev := recvEvent(t, out, errs); ev.TransactionID != "t1" {
+		t.Fatalf("first event tx = %q, want t1 (undecodable frames should be skipped)", ev.TransactionID)
 	}
-	if string(ev.Payload["k"]) != `"v"` {
-		t.Errorf("Payload[k] = %s, want \"v\"", ev.Payload["k"])
+}
+
+// TestWatchEventsPrunedCursorEndsWatch asserts a 410 (the resume cursor is past the indexer's
+// event retention window) ends the watch with that error instead of reconnecting forever.
+func TestWatchEventsPrunedCursorEndsWatch(t *testing.T) {
+	var (
+		mu    sync.Mutex
+		conns int
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		conns++
+		mu.Unlock()
+		http.Error(w, `{"error":"pruned"}`, http.StatusGone)
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	after := int64(5)
+	out, errs := ootleClient(srv.URL).WatchEvents(ctx, EventFilter{AfterID: &after})
+
+	for range out {
+		t.Fatal("no event expected")
+	}
+	err, ok := <-errs
+	if !ok {
+		t.Fatal("errs closed without the 410")
+	}
+	var httpErr *transport.HTTPError
+	if !errors.As(err, &httpErr) || httpErr.Status != http.StatusGone {
+		t.Fatalf("terminal error = %v, want a 410 *transport.HTTPError", err)
+	}
+	if _, open := <-errs; open {
+		t.Error("errs must close after the terminal 410")
+	}
+	if ctx.Err() != nil {
+		t.Error("the watch should end on the 410, not on the context deadline")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if conns != 1 {
+		t.Errorf("connections = %d, want 1 (a pruned cursor must not be retried)", conns)
 	}
 }
 
@@ -204,8 +252,8 @@ func TestWatchEventsReconnectReplaysFromLastEventID(t *testing.T) {
 // TestWatchEventsBadFrameSkipped asserts a non-JSON data: frame between two good frames is
 // skipped and the stream is NOT killed.
 func TestWatchEventsBadFrameSkipped(t *testing.T) {
-	good1 := `{"transaction_id":"t1","event":{"substate_id":"s1","template_address":"a1","payload":{"n":"1"}}}`
-	good2 := `{"transaction_id":"t2","event":{"substate_id":"s2","template_address":"a2","payload":{"n":"2"}}}`
+	good1 := eventBody("t1")
+	good2 := eventBody("t2")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeSSEFrame(t, w, "topic", "1", good1)
 		writeSSEFrame(t, w, "topic", "2", "this-is-not-json")

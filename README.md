@@ -23,7 +23,10 @@ driver loop, and ergonomic Go types.
 - A thin indexer-REST `transport` (`FetchSubstates` / `Submit` / `GetResult`).
 - **Event streaming (SSE):** `Client.WatchEvents` streams typed template events from the
   indexer (`GET /transactions/events/stream`), with automatic reconnect + `Last-Event-ID`
-  resume. Pure host JSON — no FFI/ABI change.
+  resume. The indexer serves each event as base64 CBOR; the core decodes it.
+- **Indexer value decoders:** the indexer serves engine values as base64 CBOR. `DecodeEvent`,
+  `DecodeSubstateValue`, `DecodeExecuteResult`, `DecodeTransactionReceipt`, `DecodeResource`
+  and `DecodeUTXO` decode them in the core for callers who read them directly.
 - **Multi-round resolution across the C ABI:** `apply_fetched_substates`'s `NeedMore`
   exposes the *concrete* next-fetch ids (`fetch_ids`) — including the vault id the core
   discovers inside a fetched component — and the driver fetches exactly those, so a thin
@@ -141,12 +144,17 @@ intent, err := ootle.NewStealthTransfer("component_<sender-hex>", "resource_<hex
 if err != nil {
 	panic(err)
 }
-res, err := client.SendStealthTransfer(ctx, intent,
-	ootle.StealthProductionKeys{AccountSecret: "<account-secret-hex>"})
+res, err := client.SendStealthTransfer(ctx, intent, ootle.StealthProductionKeys{
+	AccountSecret: "<account-secret-hex>",
+	ViewSecret:    "<view-secret-hex>", // keys the one-time spend key of each spent input
+})
 
-// Receive: decrypt an inbound UTXO you fetched from the indexer.
-out, err := ootle.ScanStealthOutput(ootle.NetworkLocalNet,
-	ootle.StealthScanKeys{ViewSecret: "<view-secret-hex>"}, inbound)
+// Receive: decrypt an inbound UTXO you fetched from the indexer. The view secret and the
+// account public key confirm ownership; no account secret is needed.
+out, err := ootle.ScanStealthOutput(ootle.NetworkLocalNet, ootle.StealthScanKeys{
+	ViewSecret:       "<view-secret-hex>",
+	AccountPublicKey: "<account-pubkey-hex>",
+}, inbound)
 if out.IsMine {
 	fmt.Printf("received %d µTari (mask %s)\n", out.Value, out.Mask)
 }
@@ -171,6 +179,7 @@ viewable-balance proof are **not** byte-stable — so the stealth send golden ve
 | `ScanStealthOutput` / `ScanStealthOutputs` | Stateless receive: decrypt an inbound UTXO → `DecryptedOutput` (`IsMine` / value / mask / memo). |
 | `Client.SubmitSealed` | Submit an out-of-band sealed transaction (co-signing / offline) and wait for the typed result. |
 | `Client.WatchEvents` | Stream typed template events (SSE) with reconnect/resume. |
+| `DecodeEvent` / `DecodeSubstateValue` / `DecodeExecuteResult` / … | Decode a base64 CBOR value the indexer serves (stateless, in the core). |
 | `transport.Client` | Indexer REST: `FetchSubstates` / `Submit` / `GetResult` / `WaitResult`. |
 | `ABIVersion` | The native lib's ABI tag (sanity / drift check). |
 
@@ -220,7 +229,7 @@ When `Code == "EXECUTION_FAILURE"`, `FailureCode` carries the canonical executio
 sub-code — one of: `TEMPLATE_ERROR`, `ACCESS_DENIED`, `ASSERTION_FAILED`,
 `INSUFFICIENT_FUNDS`, `OUT_OF_COMPUTE`, `LIMIT_EXCEEDED`, `INVALID_ARGUMENT`, `NOT_FOUND`,
 `DANGLING_RESOURCES`, `RESOURCE_RESTRICTED`, `INVALID_PROOF`, `ENGINE_INVARIANT`,
-`NOT_YET_VALID`, `UNCLASSIFIED`. Branch on `AbortCode` / `FailureCode` instead of parsing
+`NOT_YET_VALID`, `CONFLICT`, `UNCLASSIFIED`. Branch on `AbortCode` / `FailureCode` instead of parsing
 `Message`.
 
 ## Golden vectors & drift

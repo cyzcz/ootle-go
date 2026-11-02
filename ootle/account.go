@@ -51,17 +51,15 @@ func (a Account) TransferKeys() PublicTransferKeys {
 	return a.Keys.TransferKeys()
 }
 
-// StealthKeys returns the production key bundle for a stealth send: the account secret only (the
-// production path draws a fresh random build seed internally).
+// StealthKeys returns the production key bundle for a stealth send: the account and view secrets
+// (the production path draws a fresh random build seed internally).
 func (a Account) StealthKeys() StealthProductionKeys {
-	return StealthProductionKeys{AccountSecret: a.Keys.AccountSecret}
+	return StealthProductionKeys{AccountSecret: a.Keys.AccountSecret, ViewSecret: a.View.ViewSecret}
 }
 
-// ScanKeys returns the scan bundle for receiving stealth outputs addressed to this account. It
-// sets AccountSecret as well as ViewSecret, enabling the scanner's ownership checks (spend
-// condition + UTXO tag). A view-only caller who wants a decrypt-only scan can build
-// StealthScanKeys{ViewSecret: ...} directly.
+// ScanKeys returns the scan bundle for receiving stealth outputs addressed to this account: the
+// view secret and the account public key, which together confirm ownership (spend key + UTXO tag).
+// It holds no account secret, so a view-only wallet builds the same bundle.
 func (a Account) ScanKeys() StealthScanKeys {
-	secret := a.Keys.AccountSecret
-	return StealthScanKeys{ViewSecret: a.View.ViewSecret, AccountSecret: &secret}
+	return StealthScanKeys{ViewSecret: a.View.ViewSecret, AccountPublicKey: a.Keys.AccountPublicKey}
 }

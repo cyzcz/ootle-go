@@ -42,10 +42,12 @@
 //	OOTLE_E2E_NETWORK                  network keyword (default "localnet")
 //	OOTLE_E2E_STEALTH_FROM_ACCOUNT     sender account component address (component_<hex>)
 //	OOTLE_E2E_STEALTH_ACCOUNT_SECRET   sender account secret key (lowercase hex, no 0x)
+//	OOTLE_E2E_STEALTH_SENDER_VIEW_SECRET sender view secret (lowercase hex) — keys spent inputs
 //	OOTLE_E2E_STEALTH_RESOURCE         stealth resource address (resource_<hex>)
 //	OOTLE_E2E_STEALTH_DEST_ACCOUNT_PK  recipient account public key (lowercase hex)
 //	OOTLE_E2E_STEALTH_DEST_VIEW_PK     recipient view public key (lowercase hex)
-//	OOTLE_E2E_STEALTH_VIEW_SECRET      recipient view secret (lowercase hex) — for the scan
+//	OOTLE_E2E_STEALTH_VIEW_SECRET      recipient view secret (lowercase hex) — for the scan, with
+//	                                   the recipient account public key above
 //	OOTLE_E2E_STEALTH_OUTPUT_UTXO      the created output's UTXO substate id (utxo_<res>_<commitment>)
 //	OOTLE_E2E_STEALTH_AMOUNT           amount in µTari (default 1000)
 //	OOTLE_E2E_STEALTH_FEE              fee in µTari (default 2000)
@@ -77,6 +79,7 @@ func TestStealthRoundTrip(t *testing.T) {
 
 	fromAccount := e2eEnv(t, "OOTLE_E2E_STEALTH_FROM_ACCOUNT")
 	accountSecret := e2eEnv(t, "OOTLE_E2E_STEALTH_ACCOUNT_SECRET")
+	senderViewSecret := e2eEnv(t, "OOTLE_E2E_STEALTH_SENDER_VIEW_SECRET")
 	resource := e2eEnv(t, "OOTLE_E2E_STEALTH_RESOURCE")
 	destAccountPK := e2eEnv(t, "OOTLE_E2E_STEALTH_DEST_ACCOUNT_PK")
 	destViewPK := e2eEnv(t, "OOTLE_E2E_STEALTH_DEST_VIEW_PK")
@@ -124,6 +127,7 @@ func TestStealthRoundTrip(t *testing.T) {
 	// --- Send half --------------------------------------------------------------------------
 	result, err := client.SendStealthTransfer(ctx, intent, StealthProductionKeys{
 		AccountSecret: accountSecret,
+		ViewSecret:    senderViewSecret,
 	})
 	if err != nil {
 		t.Fatalf("e2e: SendStealthTransfer failed: %v", err)
@@ -151,7 +155,7 @@ func TestStealthRoundTrip(t *testing.T) {
 	}
 	sub := fetched[0]
 
-	scanKeys := StealthScanKeys{ViewSecret: viewSecret}
+	scanKeys := StealthScanKeys{ViewSecret: viewSecret, AccountPublicKey: destAccountPK}
 	out, err := ScanStealthSubstate(network, scanKeys, sub.SubstateID, sub.SubstateValue)
 	if err != nil {
 		t.Fatalf("e2e: ScanStealthSubstate(%s): %v", sub.SubstateID, err)
