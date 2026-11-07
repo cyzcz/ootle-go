@@ -83,7 +83,8 @@ gh release download "${TAG}" --repo "${REPO}" --dir "${WORK}" \
 # different commit is still caught by the == 1 check below.
 # The "no asset" arm is defence in depth — `gh release download` already exits non-zero when
 # no --pattern matches, so under `set -e` a wrong commit dies above, not here.
-mapfile -t ZIPS < <(ls "${WORK}"/${CRATE}-*-${TARI_PLATFORM}.zip 2>/dev/null)
+ZIPS=()  # bash 3.2 (macOS) has no mapfile
+for z in "${WORK}"/${CRATE}-*-${TARI_PLATFORM}.zip; do [[ -e "$z" ]] && ZIPS+=("$z"); done
 (( ${#ZIPS[@]} > 0 )) || { echo "error: no ${TARI_PLATFORM} asset for ${SHORT_SHA} in ${REPO}@${TAG}" >&2; exit 1; }
 (( ${#ZIPS[@]} == 1 )) || { echo "error: ${#ZIPS[@]} ${TARI_PLATFORM} assets matched ${SHORT_SHA}: ${ZIPS[*]}" >&2; exit 1; }
 ZIP="${ZIPS[0]}"
