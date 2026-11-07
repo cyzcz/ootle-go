@@ -91,7 +91,7 @@ You can only natively build your host locally. The full set is produced by the
 
 | Target | Runner |
 |---|---|
-| darwin/arm64 | macos-14 |
+| darwin/arm64 | macos-15 |
 | darwin/amd64 | macos-15-intel |
 | linux/amd64 | ubuntu-latest |
 | linux/arm64 | ubuntu-24.04-arm |

@@ -42,7 +42,7 @@ jobs:
         # GOOS/GOARCH can't distinguish musl from glibc, so the glibc linux_amd64 lib is the
         # one ootle-go vendors. Each row verifies on a runner matching its lib.
         include:
-          - { goos: darwin,  goarch: arm64, tari_platform: macos-arm64,  runner: macos-14 }
+          - { goos: darwin,  goarch: arm64, tari_platform: macos-arm64,  runner: macos-15 }
           - { goos: darwin,  goarch: amd64, tari_platform: macos-x86_64, runner: macos-15-intel }
           - { goos: linux,   goarch: amd64, tari_platform: linux-x86_64, runner: ubuntu-latest }
           - { goos: linux,   goarch: arm64, tari_platform: linux-arm64,  runner: ubuntu-24.04-arm }
